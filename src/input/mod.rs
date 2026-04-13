@@ -81,6 +81,8 @@ use smithay::{
         seat::WaylandFocus,
     },
 };
+#[cfg(feature = "systemd")]
+use tracing::warn;
 use tracing::{error, trace};
 use xkbcommon::xkb::{Keycode, Keysym};
 
@@ -1476,7 +1478,7 @@ impl State {
                     .cloned()
                 {
                     self.common.idle_notifier_state.notify_activity(&seat);
-                    // Check if the touch is from an ei device or a mapped device
+                    // Check if the touch is from an EI device or a mapped device.
                     // EI absolute coordinates are already in the compositor's global logical
                     // space (each advertised region carries its output's global offset), so use
                     // them directly and find the output they land in.
@@ -1494,10 +1496,12 @@ impl State {
                             .unwrap_or_else(|| seat.active_output());
                         (output, position)
                     } else {
-                        let Some(output) =
-                            mapped_output_for_device(&self.common.config, &shell, &event.device())
-                                .cloned()
-                        else {
+                        let Some(output) = mapped_output_for_device(
+                            &self.common.config,
+                            &shell,
+                            &seat,
+                            &event.device(),
+                        ) else {
                             return;
                         };
                         let position =
@@ -1560,10 +1564,12 @@ impl State {
                             .unwrap_or_else(|| seat.active_output());
                         (output, position)
                     } else {
-                        let Some(output) =
-                            mapped_output_for_device(&self.common.config, &shell, &event.device())
-                                .cloned()
-                        else {
+                        let Some(output) = mapped_output_for_device(
+                            &self.common.config,
+                            &shell,
+                            &seat,
+                            &event.device(),
+                        ) else {
                             return;
                         };
                         let position =
@@ -1652,10 +1658,12 @@ impl State {
                 {
                     self.common.idle_notifier_state.notify_activity(&seat);
                     notify_cursor_activity(self, &seat, PointerEventKind::Motion);
-                    let Some(output) =
-                        mapped_output_for_device(&self.common.config, &shell, &event.device())
-                            .cloned()
-                    else {
+                    let Some(output) = mapped_output_for_device(
+                        &self.common.config,
+                        &shell,
+                        &seat,
+                        &event.device(),
+                    ) else {
                         return;
                     };
 
@@ -1722,6 +1730,7 @@ impl State {
 
                         tool.frame(self, event.time());
                     }
+                    pointer.frame(self);
 
                     let mut shell = self.common.shell.write();
                     shell.update_pointer_position(position.to_local(&output), &output);
@@ -1756,10 +1765,12 @@ impl State {
                 {
                     self.common.idle_notifier_state.notify_activity(&seat);
                     notify_cursor_activity(self, &seat, PointerEventKind::Motion);
-                    let Some(output) =
-                        mapped_output_for_device(&self.common.config, &shell, &event.device())
-                            .cloned()
-                    else {
+                    let Some(output) = mapped_output_for_device(
+                        &self.common.config,
+                        &shell,
+                        &seat,
+                        &event.device(),
+                    ) else {
                         return;
                     };
 
@@ -1772,7 +1783,16 @@ impl State {
                     std::mem::drop(shell);
 
                     let pointer = seat.get_pointer().unwrap();
-                    pointer.set_location(position.as_logical());
+                    pointer.motion(
+                        self,
+                        under.clone(),
+                        &PointerMotionEvent {
+                            location: position.as_logical(),
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                        },
+                    );
+                    pointer.frame(self);
 
                     let tablet_seat = seat.tablet_seat();
 
@@ -1931,6 +1951,32 @@ impl State {
                                         time: event.time(),
                                     },
                                 );
+
+                                if let Some(pointer) = seat.get_pointer()
+                                    && !pointer.is_grabbed()
+                                {
+                                    let output = seat.active_output();
+                                    let global_position = pointer.current_location().as_global();
+                                    let target = {
+                                        let shell = self.common.shell.read();
+                                        State::element_under(
+                                            global_position,
+                                            &output,
+                                            &shell,
+                                            &seat,
+                                        )
+                                    };
+
+                                    if let Some(target) = target {
+                                        Shell::set_focus(
+                                            self,
+                                            Some(&target),
+                                            &seat,
+                                            Some(serial),
+                                            false,
+                                        );
+                                    }
+                                }
                             }
                             TabletToolTipState::Up => {
                                 tool.up(
@@ -1976,7 +2022,7 @@ impl State {
             InputEvent::Special(_) => {}
             #[allow(unused_variables)]
             InputEvent::SwitchToggle { event } => {
-                #[cfg(feature = "logind")]
+                #[cfg(feature = "systemd")]
                 if event.switch() == Some(Switch::Lid) && self.common.inhibit_lid_fd.is_some() {
                     let backend = self.backend.lock();
                     let output = backend
@@ -3240,19 +3286,28 @@ where
 
 // TODO Is it possible to determine mapping for external touchscreen?
 // Support map_to_region like sway?
-fn mapped_output_for_device<'a, D: Device + 'static>(
+fn mapped_output_for_device<D: Device + 'static>(
     config: &Config,
-    shell: &'a Shell,
+    shell: &Shell,
+    seat: &Seat<State>,
     device: &D,
-) -> Option<&'a Output> {
+) -> Option<Output> {
     let map_to_output = if let Some(device) = <dyn Any>::downcast_ref::<InputDevice>(device) {
         config
             .map_to_output(device)
             .and_then(|name| shell.outputs().find(|output| output.name() == name))
+            .cloned()
     } else {
         None
     };
-    map_to_output.or_else(|| shell.builtin_output())
+
+    map_to_output.or_else(|| {
+        if device.has_capability(DeviceCapability::TabletTool) {
+            Some(seat.focused_or_active_output())
+        } else {
+            shell.builtin_output().cloned()
+        }
+    })
 }
 
 pub fn update_output_image_copy_cursor_position(
