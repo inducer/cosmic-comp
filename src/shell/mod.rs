@@ -1372,8 +1372,13 @@ impl Workspaces {
     }
 
     pub fn active_num(&self, output: &Output) -> (Option<usize>, usize) {
-        let set = self.sets.get(output).or(self.backup_set.as_ref()).unwrap();
-        (set.previously_active.map(|(idx, _)| idx), set.active)
+        // A surface thread may finish presentation work after its output has
+        // been removed. There is no workspace namespace in that case.
+        self.sets
+            .get(output)
+            .or(self.backup_set.as_ref())
+            .map(|set| (set.previously_active.map(|(idx, _)| idx), set.active))
+            .unwrap_or((None, 0))
     }
 
     pub fn idx_for_handle(&self, output: &Output, handle: &WorkspaceHandle) -> Option<usize> {
