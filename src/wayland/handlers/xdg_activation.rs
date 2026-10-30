@@ -146,9 +146,10 @@ impl XdgActivationHandler for State {
 
                         let seat = shell.seats.last_active().clone();
                         let current_output = seat.active_output();
-                        let current_workspace = shell.active_space(&current_output).unwrap().handle;
+                        let current_workspace =
+                            shell.active_space(&current_output).map(|w| w.handle);
 
-                        if target_workspace == current_workspace {
+                        if Some(target_workspace) == current_workspace {
                             std::mem::drop(shell);
                             self.activate_surface(
                                 &surface,
@@ -184,6 +185,13 @@ impl State {
         let current_output = seat.active_output();
 
         if let Some(element) = shell.element_for_surface(surface).cloned() {
+            // The seat may still refer to an output without a workspace set.
+            let Some(current_workspace) = shell.active_space(&current_output).map(|w| w.handle)
+            else {
+                debug!("Ignoring activation without an active workspace");
+                return;
+            };
+
             if element.is_minimized() {
                 shell.unminimize_request(surface, &seat, &self.common.event_loop_handle);
             }
@@ -194,8 +202,7 @@ impl State {
             else {
                 return;
             };
-            let in_current_workspace =
-                element_workspace == shell.active_space(&current_output).unwrap().handle;
+            let in_current_workspace = element_workspace == current_workspace;
 
             if !in_current_workspace {
                 let Some(idx) = shell
@@ -216,7 +223,9 @@ impl State {
                 }
             }
 
-            let current_workspace = shell.active_space_mut(&current_output).unwrap();
+            let Some(current_workspace) = shell.active_space_mut(&current_output) else {
+                return;
+            };
             current_workspace
                 .floating_layer
                 .space
@@ -261,8 +270,8 @@ impl State {
                 false,
             );
         } else if let Some((workspace, _)) = shell.workspace_for_surface(surface) {
-            let current_workspace = shell.active_space(&current_output).unwrap();
-            if workspace == current_workspace.handle {
+            let current_workspace = shell.active_space(&current_output).map(|w| w.handle);
+            if Some(workspace) == current_workspace {
                 let Some(target) = shell
                     .workspaces
                     .space_for_handle(&workspace)
